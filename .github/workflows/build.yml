@@ -43,15 +43,4 @@ jobs:
         run: dotnet restore .\src\SystemCenter\SystemCenter.csproj -p:Platform=x64
 
       - name: Build WinUI application
-        shell: pwsh
-        run: |
-          dotnet build .\src\SystemCenter\SystemCenter.csproj --configuration Release --no-restore -p:Platform=x64 2>&1 | Tee-Object -FilePath build.log
-          exit $LASTEXITCODE
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: winui-build-log
-          path: build.log
-          if-no-files-found: warn
+        run: dotnet build .\src\SystemCenter\SystemCenter.csproj --configuration Release --no-restore -p:Platform=x64
