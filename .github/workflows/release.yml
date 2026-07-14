@@ -15,6 +15,11 @@ on:
 
 permissions:
   contents: write
+  statuses: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   package:
@@ -80,7 +85,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,18 +94,56 @@ jobs:
 
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $tag = $env:GITHUB_REF_NAME
-            $arguments = @("release", "create", $tag) + $files + @(
-              "--generate-notes",
-              "--title", "WinUI 3 Rust System Center $tag"
-            )
+            $isPrerelease = $false
           } else {
             $tag = $env:GITHUB_REF_NAME.Substring("release/".Length)
-            $arguments = @("release", "create", $tag) + $files + @(
-              "--generate-notes",
-              "--prerelease",
-              "--target", $env:GITHUB_SHA,
-              "--title", "WinUI 3 Rust System Center $tag (Test)"
-            )
+            $isPrerelease = $true
           }
 
-          gh @arguments
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $files --clobber
+            if ($isPrerelease) {
+              gh release edit $tag --prerelease --title "WinUI 3 Rust System Center $tag (Test)"
+            }
+          } else {
+            $arguments = @("release", "create", $tag) + $files + @(
+              "--generate-notes",
+              "--target", $env:GITHUB_SHA,
+              "--title", "WinUI 3 Rust System Center $tag"
+            )
+            if ($isPrerelease) {
+              $arguments += "--prerelease"
+            }
+            gh @arguments
+          }
+
+  release-status:
+    if: always()
+    needs:
+      - package
+      - publish-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report release status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          PUBLISH_RESULT: ${{ needs.publish-release.result }}
+        run: |
+          if [[ "$PACKAGE_RESULT" == "success" && "$PUBLISH_RESULT" == "success" ]]; then
+            state="success"
+            description="v0.1.0-beta.1 prerelease published"
+          else
+            state="failure"
+            description="v0.1.0-beta.1 prerelease failed"
+          fi
+
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="$state" \
+            -f context="release/v0.1.0-beta.1" \
+            -f description="$description" \
+            -f target_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/v0.1.0-beta.1"
