@@ -36,14 +36,9 @@ internal enum AppRoute
 
 internal sealed class SystemCenterApp : Component
 {
-    private static string ToTag(AppRoute route) => route.ToString().ToLowerInvariant();
-
-    private static AppRoute ToRoute(string tag)
-        => Enum.Parse<AppRoute>(tag, ignoreCase: true);
-
     public override Element Render()
     {
-        var navigation = UseNavigation(AppRoute.Overview);
+        var (route, setRoute) = UseState(AppRoute.Overview, threadSafe: true);
         var initialSettings = UseMemo(
             () => SettingsStore.Load() with { StartWithWindows = StartupRegistration.IsEnabled() },
             Array.Empty<object>());
@@ -139,36 +134,48 @@ internal sealed class SystemCenterApp : Component
             RunOperation(operation, progressText);
         }
 
-        // Microsoft.UI.Xaml.Controls.TitleBar rejects the generated FontIcon IconSource
-        // on some unpackaged/self-contained systems. Keep the native title text and let
-        // the executable icon represent the app instead of setting TitleBar.IconSource.
+        // Avoid TitleBar.IconSource: some unpackaged/self-contained WinUI systems
+        // reject generated FontIconSource values during the first Reactor mount.
         var titleBar = TitleBar("WinUI 3 Rust System Center")
             .Flex(shrink: 0);
 
-        var content = NavigationView(
-            [
-                NavItem("概览", icon: "\uE80F", tag: ToTag(AppRoute.Overview)),
-                NavItem("系统信息", icon: "\uE950", tag: ToTag(AppRoute.System)),
-                NavItem("工具", icon: "\uE90F", tag: ToTag(AppRoute.Tools)),
-                NavItem("设置", icon: "\uE713", tag: ToTag(AppRoute.Settings)),
-                NavItem("关于", icon: "\uE946", tag: ToTag(AppRoute.About)),
-            ],
-            NavigationHost(navigation, route => route switch
-            {
-                AppRoute.Overview => OverviewPage(snapshot, settings, RefreshSnapshot),
-                AppRoute.System => SystemPage(snapshot, settings),
-                AppRoute.Tools => ToolsPage(
-                    status,
-                    pendingAction,
-                    () => RunOperation(SystemBridge.RunDoctor, "正在运行 Rust 桥接诊断……"),
-                    () => RunOperation(SystemBridge.ExportReport, "正在导出系统报告……"),
-                    () => RunProtectedAction("flush-dns", SystemBridge.FlushDns, "正在刷新 DNS 缓存……"),
-                    message => setStatus(message)),
-                AppRoute.Settings => SettingsPage(settings, setSettings, UpdateStartup, message => setStatus(message)),
-                AppRoute.About => AboutPage(snapshot),
-                _ => TextBlock("页面不存在。"),
-            }))
-            .WithNavigation(navigation, ToTag, ToRoute)
+        Element page = route switch
+        {
+            AppRoute.Overview => OverviewPage(snapshot, settings, RefreshSnapshot),
+            AppRoute.System => SystemPage(snapshot, settings),
+            AppRoute.Tools => ToolsPage(
+                status,
+                pendingAction,
+                () => RunOperation(SystemBridge.RunDoctor, "正在运行 Rust 桥接诊断……"),
+                () => RunOperation(SystemBridge.ExportReport, "正在导出系统报告……"),
+                () => RunProtectedAction("flush-dns", SystemBridge.FlushDns, "正在刷新 DNS 缓存……"),
+                message => setStatus(message)),
+            AppRoute.Settings => SettingsPage(settings, setSettings, UpdateStartup, message => setStatus(message)),
+            AppRoute.About => AboutPage(snapshot),
+            _ => TextBlock("页面不存在。"),
+        };
+
+        // Microsoft.UI.Reactor preview.11 assigns NavigationView.SelectedItem during
+        // mount. On some unpackaged/self-contained systems that native setter throws
+        // FileNotFoundException while resolving WinUI resources. A button-based shell
+        // keeps navigation deterministic without touching NavigationView.SelectedItem.
+        var sidebar = Border(
+                VStack(8,
+                    TextBlock("系统中心").FontSize(18).SemiBold().Margin(bottom: 8),
+                    SidebarButton("概览", AppRoute.Overview, route, setRoute),
+                    SidebarButton("系统信息", AppRoute.System, route, setRoute),
+                    SidebarButton("工具", AppRoute.Tools, route, setRoute),
+                    SidebarButton("设置", AppRoute.Settings, route, setRoute),
+                    SidebarButton("关于", AppRoute.About, route, setRoute)))
+            .Background(Theme.LayerFill)
+            .WithBorder(Theme.DividerStroke)
+            .Padding(14)
+            .Width(220)
+            .Flex(shrink: 0);
+
+        var content = FlexRow(
+                sidebar,
+                Border(page).Flex(grow: 1, basis: 0))
             .Flex(grow: 1, basis: 0);
 
         var statusBar = Border(
@@ -191,6 +198,15 @@ internal sealed class SystemCenterApp : Component
             _ => root,
         };
     }
+
+    private static Element SidebarButton(
+        string label,
+        AppRoute target,
+        AppRoute current,
+        Action<AppRoute> navigate)
+        => Button(current == target ? $"●  {label}" : $"    {label}", () => navigate(target))
+            .HorizontalContentAlignment(HorizontalAlignment.Left)
+            .Width(190);
 
     private static Element OverviewPage(SystemSnapshot snapshot, AppSettings settings, Action refresh)
     {
