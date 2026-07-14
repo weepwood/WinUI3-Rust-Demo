@@ -139,8 +139,10 @@ internal sealed class SystemCenterApp : Component
             RunOperation(operation, progressText);
         }
 
+        // Microsoft.UI.Xaml.Controls.TitleBar rejects the generated FontIcon IconSource
+        // on some unpackaged/self-contained systems. Keep the native title text and let
+        // the executable icon represent the app instead of setting TitleBar.IconSource.
         var titleBar = TitleBar("WinUI 3 Rust System Center")
-            .Icon(FontIcon("\uE770", "Segoe Fluent Icons"))
             .Flex(shrink: 0);
 
         var content = NavigationView(
