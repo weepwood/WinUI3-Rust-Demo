@@ -1,6 +1,5 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
-using Microsoft.UI.Xaml;
 using WinUI3RustDemo.Models;
 using WinUI3RustDemo.Services;
 using static Microsoft.UI.Reactor.Factories;
@@ -12,8 +11,52 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        AppBootstrap.InitialSnapshot = SystemBridge.ReadSnapshot();
-        ReactorApp.Run<SystemCenterApp>("WinUI 3 Rust System Center", width: 1180, height: 760);
+        StartupDiagnostics.Initialize();
+        StartupDiagnostics.Write("process-main-enter");
+
+        AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+        {
+            if (eventArgs.ExceptionObject is Exception exception)
+            {
+                StartupDiagnostics.WriteException("appdomain-unhandled", exception);
+            }
+            else
+            {
+                StartupDiagnostics.Write($"appdomain-unhandled: {eventArgs.ExceptionObject}");
+            }
+        };
+
+        TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
+        {
+            StartupDiagnostics.WriteException("task-unobserved", eventArgs.Exception);
+        };
+
+        ReactorApplication.OnUnhandledException = exception =>
+        {
+            StartupDiagnostics.WriteException("xaml-unhandled", exception);
+            return false;
+        };
+
+        try
+        {
+            StartupDiagnostics.Write("snapshot-read-start");
+            AppBootstrap.InitialSnapshot = SystemBridge.ReadSnapshot();
+            StartupDiagnostics.Write($"snapshot-read-complete: success={AppBootstrap.InitialSnapshot.Success}");
+            StartupDiagnostics.Write("reactor-run-start");
+
+            ReactorApp.Run<SystemCenterApp>(
+                "WinUI 3 Rust System Center",
+                width: 1180,
+                height: 760,
+                configure: _ => StartupDiagnostics.Write("reactor-host-configured"));
+
+            StartupDiagnostics.Write("reactor-run-returned");
+        }
+        catch (Exception exception)
+        {
+            StartupDiagnostics.WriteException("main-fatal", exception);
+            StartupDiagnostics.ShowFatal(exception);
+        }
     }
 }
 
@@ -36,8 +79,13 @@ internal enum AppRoute
 
 internal sealed class SystemCenterApp : Component
 {
+    private static int _renderCount;
+
     public override Element Render()
     {
+        var renderNumber = Interlocked.Increment(ref _renderCount);
+        StartupDiagnostics.Write($"render-enter: {renderNumber}");
+
         var (route, setRoute) = UseState(AppRoute.Overview, threadSafe: true);
         var initialSettings = UseMemo(
             () => SettingsStore.Load() with { StartWithWindows = StartupRegistration.IsEnabled() },
@@ -78,6 +126,11 @@ internal sealed class SystemCenterApp : Component
                 catch (OperationCanceledException)
                 {
                 }
+                catch (Exception exception)
+                {
+                    StartupDiagnostics.WriteException("auto-refresh", exception);
+                    setStatus($"自动刷新失败：{exception.Message}");
+                }
             });
 
             return () =>
@@ -93,11 +146,19 @@ internal sealed class SystemCenterApp : Component
             setStatus("正在通过 Rust 桥接刷新系统信息……");
             _ = Task.Run(() =>
             {
-                var result = SystemBridge.ReadSnapshot();
-                setSnapshot(result.Snapshot);
-                setStatus(result.Success
-                    ? $"系统信息已刷新：{DateTime.Now:HH:mm:ss}"
-                    : result.Message);
+                try
+                {
+                    var result = SystemBridge.ReadSnapshot();
+                    setSnapshot(result.Snapshot);
+                    setStatus(result.Success
+                        ? $"系统信息已刷新：{DateTime.Now:HH:mm:ss}"
+                        : result.Message);
+                }
+                catch (Exception exception)
+                {
+                    StartupDiagnostics.WriteException("manual-refresh", exception);
+                    setStatus($"刷新失败：{exception.Message}");
+                }
             });
         }
 
@@ -106,8 +167,16 @@ internal sealed class SystemCenterApp : Component
             setStatus(progressText);
             _ = Task.Run(() =>
             {
-                var result = operation();
-                setStatus(result.Message);
+                try
+                {
+                    var result = operation();
+                    setStatus(result.Message);
+                }
+                catch (Exception exception)
+                {
+                    StartupDiagnostics.WriteException("operation", exception);
+                    setStatus($"操作失败：{exception.Message}");
+                }
             });
         }
 
@@ -134,11 +203,6 @@ internal sealed class SystemCenterApp : Component
             RunOperation(operation, progressText);
         }
 
-        // Avoid TitleBar.IconSource: some unpackaged/self-contained WinUI systems
-        // reject generated FontIconSource values during the first Reactor mount.
-        var titleBar = TitleBar("WinUI 3 Rust System Center")
-            .Flex(shrink: 0);
-
         Element page = route switch
         {
             AppRoute.Overview => OverviewPage(snapshot, settings, RefreshSnapshot),
@@ -155,10 +219,20 @@ internal sealed class SystemCenterApp : Component
             _ => TextBlock("页面不存在。"),
         };
 
-        // Microsoft.UI.Reactor preview.11 assigns NavigationView.SelectedItem during
-        // mount. On some unpackaged/self-contained systems that native setter throws
-        // FileNotFoundException while resolving WinUI resources. A button-based shell
-        // keeps navigation deterministic without touching NavigationView.SelectedItem.
+        // Compatibility shell: use only basic WinUI controls during startup. The
+        // experimental TitleBar, SystemBackdrop/Mica and theme resource tokens are
+        // intentionally omitted because the reported 0xc000027b originates inside
+        // Microsoft.UI.Xaml.dll before a managed stack can be surfaced.
+        var header = Border(
+                HStack(12,
+                    TextBlock("WinUI 3 Rust System Center").FontSize(18).SemiBold(),
+                    Caption("兼容启动模式").Flex(grow: 1, basis: 0),
+                    Caption($"Bridge {snapshot.BridgeVersion}")))
+            .Background("#FFF3F3F3")
+            .WithBorder("#FFD0D0D0", 1)
+            .Padding(12)
+            .Flex(shrink: 0);
+
         var sidebar = Border(
                 VStack(8,
                     TextBlock("系统中心").FontSize(18).SemiBold().Margin(bottom: 8),
@@ -167,8 +241,8 @@ internal sealed class SystemCenterApp : Component
                     SidebarButton("工具", AppRoute.Tools, route, setRoute),
                     SidebarButton("设置", AppRoute.Settings, route, setRoute),
                     SidebarButton("关于", AppRoute.About, route, setRoute)))
-            .Background(Theme.LayerFill)
-            .WithBorder(Theme.DividerStroke)
+            .Background("#FFF7F7F7")
+            .WithBorder("#FFD0D0D0", 1)
             .Padding(14)
             .Width(220)
             .Flex(shrink: 0);
@@ -182,21 +256,14 @@ internal sealed class SystemCenterApp : Component
                 HStack(8,
                     TextBlock("状态").SemiBold(),
                     Caption(status).Flex(grow: 1, basis: 0),
-                    Caption($"Bridge {snapshot.BridgeVersion}")))
-            .Background(Theme.LayerFill)
-            .WithBorder(Theme.DividerStroke)
+                    Caption($"诊断日志：{StartupDiagnostics.LogFilePath}")))
+            .Background("#FFF3F3F3")
+            .WithBorder("#FFD0D0D0", 1)
             .Padding(10)
             .Flex(shrink: 0);
 
-        Element root = FlexColumn(titleBar, content, statusBar)
-            .Backdrop(BackdropKind.Mica);
-
-        return settings.ThemeMode switch
-        {
-            1 => root.RequestedTheme(ElementTheme.Light),
-            2 => root.RequestedTheme(ElementTheme.Dark),
-            _ => root,
-        };
+        StartupDiagnostics.Write($"render-tree-created: {renderNumber}");
+        return FlexColumn(header, content, statusBar);
     }
 
     private static Element SidebarButton(
@@ -205,7 +272,6 @@ internal sealed class SystemCenterApp : Component
         AppRoute current,
         Action<AppRoute> navigate)
         => Button(current == target ? $"●  {label}" : $"    {label}", () => navigate(target))
-            .HorizontalContentAlignment(HorizontalAlignment.Left)
             .Width(190);
 
     private static Element OverviewPage(SystemSnapshot snapshot, AppSettings settings, Action refresh)
@@ -332,10 +398,10 @@ internal sealed class SystemCenterApp : Component
         return ScrollView(
             VStack(16,
                 Heading("设置"),
-                Caption("设置写入当前用户的 LocalAppData，不需要管理员权限。"),
+                Caption("设置写入当前用户的 LocalAppData，不需要管理员权限。兼容启动版暂不应用主题切换。"),
                 SectionCard("外观",
                     VStack(14,
-                        SettingsRow("主题", "选择应用的明暗模式。",
+                        SettingsRow("主题", "选项会保存；兼容启动版暂时使用固定基础配色。",
                             ComboBox(["跟随系统", "浅色", "深色"], settings.ThemeMode,
                                 value => setSettings(settings with { ThemeMode = value })).Width(180)),
                         SettingsRow("紧凑布局", "减少卡片间距与页面留白。",
@@ -360,6 +426,10 @@ internal sealed class SystemCenterApp : Component
                         SettingsRow("确认系统命令", "DNS 刷新等操作需要连续点击两次。",
                             ToggleSwitch(settings.ConfirmSystemActions,
                                 value => setSettings(settings with { ConfirmSystemActions = value }))))),
+                SectionCard("启动诊断",
+                    VStack(8,
+                        InfoRow("日志文件", StartupDiagnostics.LogFilePath),
+                        InfoRow("崩溃转储", StartupDiagnostics.DumpDirectory))),
                 HStack(10,
                     Button("恢复默认设置", ResetSettings),
                     Button("打开应用数据目录", () =>
@@ -380,7 +450,8 @@ internal sealed class SystemCenterApp : Component
                 SectionCard("WinUI 3 Rust System Center",
                     VStack(10,
                         TextBlock("使用 Microsoft.UI.Reactor 构建声明式 WinUI 3 界面，并使用 Rust 收集系统信息。"),
-                        InfoRow("应用版本", "0.1.0"),
+                        InfoRow("应用版本", "0.1.0-beta.4"),
+                        InfoRow("运行模式", "基础兼容模式"),
                         InfoRow("Rust Bridge", snapshot.BridgeVersion),
                         InfoRow("UI 框架", "Microsoft.UI.Reactor 0.1.0-preview.11"),
                         InfoRow("Windows App SDK", "2.1.3"))),
@@ -397,8 +468,8 @@ internal sealed class SystemCenterApp : Component
                     Caption(title),
                     TextBlock(value).FontSize(compact ? 24 : 30).SemiBold(),
                     Caption(detail)))
-            .Background(Theme.CardBackground)
-            .WithBorder(Theme.CardStroke)
+            .Background("#FFFFFFFF")
+            .WithBorder("#FFD9D9D9", 1)
             .CornerRadius(12)
             .Padding(compact ? 12 : 16)
             .Width(compact ? 220 : 250);
@@ -408,8 +479,8 @@ internal sealed class SystemCenterApp : Component
                 VStack(12,
                     SubHeading(title),
                     content))
-            .Background(Theme.CardBackground)
-            .WithBorder(Theme.CardStroke)
+            .Background("#FFFFFFFF")
+            .WithBorder("#FFD9D9D9", 1)
             .CornerRadius(12)
             .Padding(18);
 
@@ -423,8 +494,8 @@ internal sealed class SystemCenterApp : Component
                         Caption(disk.FileSystem).Flex(grow: 1, basis: 0),
                         TextBlock($"{disk.UsagePercent:F1}%")),
                     Caption($"已使用 {FormatBytes(used)} · 可用 {FormatBytes(disk.AvailableBytes)} · 总计 {FormatBytes(disk.TotalBytes)}")))
-            .Background(Theme.CardBackground)
-            .WithBorder(Theme.CardStroke)
+            .Background("#FFFFFFFF")
+            .WithBorder("#FFD9D9D9", 1)
             .CornerRadius(10)
             .Padding(compact ? 12 : 16);
     }
