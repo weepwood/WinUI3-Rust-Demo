@@ -33,8 +33,8 @@ jobs:
           rustup default stable
           rustup target add x86_64-pc-windows-msvc
 
-      - name: Format Rust source
-        run: cargo fmt --manifest-path .\src\sysbridge\Cargo.toml
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path .\src\sysbridge\Cargo.toml -- --check
 
       - name: Test Rust bridge
         run: cargo test --manifest-path .\src\sysbridge\Cargo.toml
