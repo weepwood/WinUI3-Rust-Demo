@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -16,6 +19,7 @@ permissions:
 
 jobs:
   package:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/v')
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -43,9 +47,13 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        env:
+          RELEASE_HEAD: ${{ github.head_ref }}
         run: |
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          } elseif ($env:GITHUB_EVENT_NAME -eq "pull_request" -and $env:RELEASE_HEAD -like "release/v*") {
+            $version = $env:RELEASE_HEAD.Substring("release/v".Length)
           } else {
             $version = "${{ inputs.version }}"
           }
@@ -65,7 +73,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/v'))
     needs: package
     runs-on: windows-latest
 
@@ -76,11 +84,40 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_HEAD: ${{ github.head_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $files = Get-ChildItem .\artifacts -File | Select-Object -ExpandProperty FullName
-          gh release create $env:GITHUB_REF_NAME $files --generate-notes --title "WinUI 3 Rust System Center $env:GITHUB_REF_NAME"
+
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+            $target = $env:GITHUB_SHA
+            $isPrerelease = $false
+          } else {
+            $tag = $env:RELEASE_HEAD.Substring("release/".Length)
+            $target = $env:PR_HEAD_SHA
+            $isPrerelease = $true
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $files --clobber
+            if ($isPrerelease) {
+              gh release edit $tag --prerelease --title "WinUI 3 Rust System Center $tag (Test)"
+            }
+          } else {
+            $arguments = @("release", "create", $tag) + $files + @(
+              "--generate-notes",
+              "--target", $target,
+              "--title", "WinUI 3 Rust System Center $tag (Test)"
+            )
+            if ($isPrerelease) {
+              $arguments += "--prerelease"
+            }
+            gh @arguments
+          }
