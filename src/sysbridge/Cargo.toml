@@ -1,0 +1,17 @@
+[package]
+name = "sysbridge"
+version = "0.1.0"
+edition = "2021"
+description = "Allow-listed Windows system bridge for WinUI 3 Rust System Center"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.33.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
