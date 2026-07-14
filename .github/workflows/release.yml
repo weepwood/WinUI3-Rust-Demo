@@ -6,6 +6,13 @@ on:
       - "v*"
     branches:
       - "release/**"
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
   workflow_dispatch:
     inputs:
       version:
@@ -18,11 +25,12 @@ permissions:
   statuses: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   package:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -50,9 +58,13 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        env:
+          RELEASE_HEAD: ${{ github.head_ref }}
         run: |
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          } elseif ($env:RELEASE_HEAD -like "release/v*") {
+            $version = $env:RELEASE_HEAD.Substring("release/v".Length)
           } elseif ($env:GITHUB_REF_NAME -like "release/v*") {
             $version = $env:GITHUB_REF_NAME.Substring("release/v".Length)
           } else {
@@ -74,7 +86,10 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    if: startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/release/')
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      startsWith(github.ref, 'refs/heads/release/') ||
+      startsWith(github.head_ref, 'release/')
     needs: package
     runs-on: windows-latest
 
@@ -89,14 +104,22 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_HEAD: ${{ github.head_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $files = Get-ChildItem .\artifacts -File | Select-Object -ExpandProperty FullName
 
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $tag = $env:GITHUB_REF_NAME
+            $target = $env:GITHUB_SHA
             $isPrerelease = $false
+          } elseif ($env:RELEASE_HEAD -like "release/v*") {
+            $tag = $env:RELEASE_HEAD.Substring("release/".Length)
+            $target = $env:PR_HEAD_SHA
+            $isPrerelease = $true
           } else {
             $tag = $env:GITHUB_REF_NAME.Substring("release/".Length)
+            $target = $env:GITHUB_SHA
             $isPrerelease = $true
           }
 
@@ -109,7 +132,7 @@ jobs:
           } else {
             $arguments = @("release", "create", $tag) + $files + @(
               "--generate-notes",
-              "--target", $env:GITHUB_SHA,
+              "--target", $target,
               "--title", "WinUI 3 Rust System Center $tag"
             )
             if ($isPrerelease) {
@@ -119,7 +142,7 @@ jobs:
           }
 
   release-status:
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/'))
     needs:
       - package
       - publish-release
@@ -132,6 +155,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           PUBLISH_RESULT: ${{ needs.publish-release.result }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [[ "$PACKAGE_RESULT" == "success" && "$PUBLISH_RESULT" == "success" ]]; then
             state="success"
@@ -141,8 +165,9 @@ jobs:
             description="v0.1.0-beta.1 prerelease failed"
           fi
 
+          status_sha="${PR_HEAD_SHA:-$GITHUB_SHA}"
           gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            "repos/${GITHUB_REPOSITORY}/statuses/${status_sha}" \
             -f state="$state" \
             -f context="release/v0.1.0-beta.1" \
             -f description="$description" \
