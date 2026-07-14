@@ -172,7 +172,10 @@ fn print_doctor() -> Result<(), String> {
         "disk_count": snapshot.disks.len(),
         "process_count": snapshot.process_count
     });
-    println!("{}", serde_json::to_string(&output).map_err(|error| error.to_string())?);
+    println!(
+        "{}",
+        serde_json::to_string(&output).map_err(|error| error.to_string())?
+    );
     Ok(())
 }
 
@@ -180,7 +183,8 @@ fn export_snapshot(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let output = serde_json::to_string_pretty(&collect_snapshot()).map_err(|error| error.to_string())?;
+    let output =
+        serde_json::to_string_pretty(&collect_snapshot()).map_err(|error| error.to_string())?;
     fs::write(path, output).map_err(|error| error.to_string())?;
     println!("{}", path.display());
     Ok(())
@@ -198,7 +202,14 @@ fn flush_dns() -> Result<(), String> {
 
     if output.status.success() {
         let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        println!("{}", if message.is_empty() { "DNS cache refreshed" } else { &message });
+        println!(
+            "{}",
+            if message.is_empty() {
+                "DNS cache refreshed"
+            } else {
+                &message
+            }
+        );
         Ok(())
     } else {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
