@@ -80,6 +80,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           $files = Get-ChildItem .\artifacts -File | Select-Object -ExpandProperty FullName
           gh release create $env:GITHUB_REF_NAME $files --generate-notes --title "WinUI 3 Rust System Center $env:GITHUB_REF_NAME"
